@@ -1,0 +1,79 @@
+fun BroadcastReceiver(
+  context: Context,
+  coroutineScope: CoroutineScope,
+  systemAction: String,
+  onSystemEvent: (otp: String?) -> Unit
+) {
+//
+  val currentOnSystemEvent by rememberUpdatedState(onSystemEvent)
+  //
+  DisposableEffect(context, systemAction) {
+    val intentFilter = IntentFilter(systemAction)
+    val broadcast = SmsBroadcastReceiverCompose(coroutineScope) {
+      currentOnSystemEvent.invoke(it)
+    }
+    context.registerReceiver(broadcast, intentFilter)
+    onDispose {
+      context.unregisterReceiver(broadcast)
+    }
+  }
+}
+open class SmsBroadcastReceiverCompose(
+  private var coroutineScope: CoroutineScope,
+  private var onSystemEvent: (otp: String?) -> Unit
+) : BroadcastReceiver() {
+ 
+  override fun onReceive(context: Context, intent: Intent) {
+    try {
+      coroutineScope.launch(Dispatchers.IO) {
+        val intentExtras = intent.extras
+        if (intentExtras != null) {
+          val sms = intentExtras[SMS_BUNDLE] as Array<*>?
+          sendSms(sms, intentExtras) {
+            onSystemEvent.invoke(it)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      JioExceptionHandler.handle(e)
+    }
+  }
+  private suspend fun sendSms(
+    sms: Array<*>?,
+    intentExtras: Bundle,
+    onSystemEvent: (otp: String) -> Unit
+  ) {
+    val smsCodeLength: Int = 6
+    val messageBody = StringBuilder()
+    try {
+      sms?.indices?.forEach { i ->
+        val smsMessage: SmsMessage? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+          val format: String = intentExtras["format"] as String
+          SmsMessage.createFromPdu(sms[i] as ByteArray, format)
+        } else {
+          SmsMessage.createFromPdu(sms[i] as ByteArray)
+        }
+        val address = smsMessage?.originatingAddress
+        if (address != null && (senderList.contains(address) || address.endsWith(
+            suffix = "JIONET",
+            ignoreCase = true
+          ) || address.endsWith(suffix = "JIOMNY", ignoreCase = true))
+        ) {
+          messageBody.append(smsMessage.messageBody)
+          val verificationCode = getVerificationCodeFromSms(smsMessage.messageBody, smsCodeLength)
+          withContext(Dispatchers.Main) {
+            onSystemEvent.invoke(verificationCode)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      JioExceptionHandler.handle(e)
+    }
+  }
+  companion object {
+    const val SMS_BUNDLE = "pdus"
+  }
+}
+internal fun getVerificationCodeFromSms(sms: String, smsCodeLength: Int): String =
+  sms.filter { it.isDigit() }
+    .substring(0 until smsCodeLength)
